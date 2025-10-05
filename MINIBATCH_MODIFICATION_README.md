@@ -2,48 +2,50 @@
 
 ## 修改概述
 
-本修改为中央流(Central Flows)项目添加了mini-batch训练支持，允许同时比较full-batch和mini-batch版本的行为差异。
+本修改为Central Flows项目添加了mini-batch训练支持，并扩展支持多进程同时优化对比。现在支持在一个实验中同时运行full-batch GD、mini-batch SGD和central flow，提供了完整的优化算法理论对比平台。
 
 ## 主要修改
 
 ### 1. 数据集修改 (`src/datasets.py`)
-- 添加 `train_batch_size` 参数控制mini-batch大小
-- 修改 `Dataset` NamedTuple包含两个training数据集版本
-- 新增 `_create_training_batches()` 方法重新组织批次
+- 添加 `batch_size` 参数控制mini-batch大小
+- 修改 `Dataset` NamedTuple包含完整数据集和batch数据集
+- 自动计算和创建mini-batches用于训练
 
 ### 2. 主训练脚本修改 (`main.py`)
-- 新增参数：`epochs`, `batch_size`, `compare_full_vs_mini`
-- 支持同时运行 `discrete_full` 和 `discrete_mini` 进程
-- 确保每次参数更新后立即计算full-batch Hessian
+- 新增 `--compare-full-vs-mini` 参数启用batch级别对比
+- 新增 `--batch-size` 参数设置mini-batch大小
+- 支持 `--runs discrete central` 同时运行discrete和central进程
+- 自动计算正确的 `total_steps = epochs * batches * processes`
+- 实现三进程同步训练：full-batch、mini-batch、central flow
 
-### 3. 公平的对比机制
+### 3. 可视化脚本增强 (`plot_training_curves.py`)
+- 增强错误处理，防御性编程防止数组越界
+- 支持三进程数据同时可视化
+- 添加调试信息显示HDF5文件结构
+- 自动检测可用的数据类型并显示
 
-#### mini-batch版本：
-1. 每个epoch遍历所有训练批次
-2. **每个batch使用该batch的梯度更新参数**
-3. 立即在新的参数位置计算full-batch Hessian
-
-#### full-batch版本：
-1. **每个batch也更新一次参数**（与mini-batch更新频率完全相同）
-2. **但始终使用全数据集的梯度**
-3. 然后计算full-batch Hessian
-
-**核心优势**：两个版本具有完全相同的更新频率和Hessian计算频率，只有梯度来源不同，确保公平对比。
+### 4. 存储空间自动适配
+- 动态计算HDF5数组大小，容纳所有进程的所有步数
+- 避免IndexError，支持任意组合的进程数量
 
 ## 使用方法
 
-### 1. 训练对比实验
+### 1. 基础mini-batch对比
 
 ```bash
-# 对比full-batch和mini-batch训练
 python main.py opt:gd data:moons arch:mlp \
     --opt.lr=0.02 \
     --epochs=20 \
     --batch-size=32 \
     --compare-full-vs-mini \
     --runs discrete
+```
 
-# 同时对比 full-batch、mini-batch和central flow
+这会运行full-batch GD vs mini-batch SGD对比，其中mini-batch使用batch_size=32。
+
+### 2. 三进程完整对比
+
+```bash
 python main.py opt:gd data:moons arch:mlp \
     --opt.lr=0.02 \
     --epochs=20 \
@@ -52,77 +54,74 @@ python main.py opt:gd data:moons arch:mlp \
     --runs discrete central
 ```
 
-### 2. 单独训练mini-batch
+这会同时运行：
+- full-batch discrete GD
+- mini-batch discrete SGD
+- central flow (连续时间优化)
+
+### 3. 单进程训练 (原始模式)
 
 ```bash
-# 只运行mini-batch版本
 python main.py opt:gd data:cifar10 arch:cnn \
     --opt.lr=0.01 \
     --epochs=50 \
     --batch-size=128 \
-    --compare-full-vs-mini=False
+    --compare-full-vs-mini=False \
+    --runs discrete
 ```
 
 ## 数据保存格式
 
-训练数据保存为HDF5格式，包含：
-- `discrete_full/step_N/`: full-batch版本第N步的数据
-- `discrete_mini/step_N/`: mini-batch版本第N步的数据
-- `comparison/`: epoch级别的对比统计
+### HDF5结构
+```
+experiments/{exp_id}/data.hdf5
+├── step/                    # 索引数组 (辅助用)
+├── discrete_full/           # full-batch进程数据
+│   ├── loss                 # [N]数组 - 每个batch的loss值
+│   ├── grad_norm           # [N]数组 - 每个batch的梯度范数
+│   └── hessian_eigs        # [N, K]数组 - 前K个Hessian特征值
+├── discrete_mini/           # mini-batch进程数据
+│   ├── loss
+│   ├── grad_norm
+│   └── hessian_eigs
+└── central/                 # central flow进程数据
+    ├── loss
+    ├── grad_norm
+    └── hessian_eigs
+```
+
+**数组长度N**: `epochs × num_batches × num_processes`
+
+**示例计算**: 如果 `epochs=20, batch_size=32, runs=discrete central`，
+- 数据集被分7个batch: `(100÷32) = ~4个完整batch`
+- 进程数: `discrete`创建2个 + `central`1个 = `3个进程`
+- 总步数: `20 × 7 × 3 = 420` (**因数据集大小而异**)
+
+**total_steps 用于**: 初始化HDF5数组存储空间
+```python
+# 在DataSaver.__init__() 中使用:
+with DataSaver(folder / "data.hdf5", 0, total_steps) as data_saver
+```
 
 ## 可视化工具
 
-使用提供的 `plot_training_curves.py` 脚本可视化结果：
-
-使用训练程序输出的实际路径替换下面的 `<experiment_path>`。
-
-例如，如果训练输出显示："Saving data to: experiments/xyz789abc"
+运行可视化脚本查看完整对比：
 
 ```bash
-# 可视化训练结果
-python plot_training_curves.py experiments/xyz789abc
+# 接下来显示图片（GUI环境）
+python plot_training_curves.py experiments/your_exp_id
 
-# 保存图片而不显示GUI
-python plot_training_curves.py experiments/xyz789abc --save-path=results.png --no-show
+# 保存图片到文件（服务器推荐）
+python plot_training_curves.py experiments/your_exp_id --save-path results.png --no-show
+
+# 保存为PDF等其他格式
+python plot_training_curves.py experiments/your_exp_id --save-path results.pdf --no-show
 ```
 
-可视化图表包括：
-1. **Training Loss**: 三个版本的损失曲线对比
-2. **Gradient Norm**: 梯度范数演化
-3. **Hessian Eigenvalues**: 前几个Hessian特征值的演化
-4. **Training Summary**: 最终损失对比
+### 可视化输出
+生成的图包含4个子图：
 
-## 理论保证
-
-### Hessian计算原则
-- **位置相关**: Hessian在各自历程的参数位置计算
-- **实时更新**: 每次参数更新后立即重新计算Hessian
-- **理论一致**: Central Flows理论基于full-batch Hessian分析，使用full-batch数据保证理论正确性
-
-### 批次处理:
-- mini-batch使用当前batch梯度进行实际参数更新
-- Hessian使用full-batch数据确保分析的一致性
-
-## 关键设计决策
-
-1. **Hessian始终基于全数据**: 保证理论框架的正确性
-2. **每个更新后立即计算**: 确保Hessian信息的新鲜度
-3. **保存完整轨迹**: 允许后续分析不同优化路径的行为差异
-4. **公平的更新频率**: 两个版本以相同的切片频率进行更新
-
-## 示例输出
-
-运行对比实验后，您将看到两个版本收敛轨迹的差异，以及它们各自在相同Hessian景观下的行为表现。这对于理解mini-batch SGD相对于full-batch GD的优势和局限性至关重要。
-
-## 实验建议
-
-1. **开始小规模测试**: 先在简单数据集如Moons上测试功能
-2. **渐进式对比**: 从相同的batch大小开始，然后尝试不同的batch_size
-3. **理论验证**: 观察mini-batch是否能达到类似的sharpness最小值
-4. **收敛分析**: 比较两个版本的收敛速度和最终性能
-
-## 核心优势
-
-- **精确对比**: 相同的更新频率和Hessian计算频率
-- **理论严谨**: 始终使用full-batch Hessian保持Central Flows理论的适用性
-- **实验价值**: 可以隔离梯度估计对优化的影响
+1. **训练损失曲线** - 三个进程的loss下降轨迹
+2. **梯度范数曲线** - 显示梯度收敛行为
+3. **Hessian特征值** - 显示sharpness演化（如果有数据）
+4. **训练总结** - 显示最终loss和统计对比

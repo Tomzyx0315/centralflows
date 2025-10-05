@@ -26,13 +26,18 @@ def load_experiment_data(experiment_path):
         # 打印所有可用的key来调试
         print(f"Found HDF5 keys: {list(f.keys())}")
 
+        # 打印每个key的subkeys来理解结构
+        for key in f.keys():
+            if key != 'step':  # skip the step array
+                print(f"Group '{key}': {list(f[key].keys())}")
+
         # 查找所有根级别的键
         for key in f.keys():
-            if key.startswith("discrete_full") or key == "discrete_full":
+            if key == "discrete_full":
                 data["full_batch"] = extract_process_data(f, key)
-            elif key.startswith("discrete_mini") or key == "discrete_mini":
+            elif key == "discrete_mini":
                 data["mini_batch"] = extract_process_data(f, key)
-            elif key.startswith("central") or key == "central":
+            elif key == "central":
                 data["central_flow"] = extract_process_data(f, key)
 
         # 如果没有找到带后缀的数据，尝试不带后缀的
@@ -44,42 +49,61 @@ def load_experiment_data(experiment_path):
 
 def extract_process_data(f, process_key):
     """从HDF5文件中提取一个进程的数据"""
-    if process_key not in f:
-        return None
-
-    process_group = f[process_key]
+    # DataSaver保存数据的方式：每个数据集是一个time series，索引0到total_steps-1对应步骤0到total_steps-1
+    # 数据结构是process_key/loss, process_key/grad_norm等
     data = {}
 
-    # 收集所有step的数据
+    # 构造数据集key
+    loss_key = f"{process_key}/loss"
+    grad_norm_key = f"{process_key}/grad_norm"
+    hessian_key = f"{process_key}/hessian_eigs"
+
+    # 收集有效数据点
     steps = []
     losses = []
     grad_norms = []
     hessian_eigs = []
 
-    for step_key in sorted(process_group.keys(), key=lambda x: int(x) if x.isdigit() else float('inf')):
-        if not step_key.isdigit():
-            continue
+    if loss_key in f:
+        loss_dataset = f[loss_key]
+        for i in range(len(loss_dataset)):
+            val = loss_dataset[i]
+            if not np.isnan(val):  # 只取有效值
+                steps.append(i)
+                losses.append(float(val))
 
-        step_data = process_group[step_key]
-        if "loss" in step_data:
-            steps.append(int(step_key))
-            losses.append(float(step_data["loss"][()]))
+    if grad_norm_key in f and len(steps) > 0:
+        grad_norm_dataset = f[grad_norm_key]
+        idx_offset = 0
+        for i in range(len(grad_norm_dataset)):
+            if i in steps:
+                val = grad_norm_dataset[i]
+                if not np.isnan(val):
+                    grad_norms.append(float(val))
+                else:
+                    grad_norms.append(0.0)  # 默认值
 
-            if "grad_norm" in step_data:
-                grad_norms.append(float(step_data["grad_norm"][()]))
-
-            if "hessian_eigs" in step_data:
-                hessian_eigs.append(np.array(step_data["hessian_eigs"][:]))
+    if hessian_key in f and len(steps) > 0:
+        hessian_dataset = f[hessian_key]
+        idx_offset = 0
+        for i in range(len(hessian_dataset)):
+            if i in steps:
+                val = hessian_dataset[i]
+                if not np.all(np.isnan(val)):
+                    hessian_eigs.append(np.array(val))
+                else:
+                    hessian_eigs.append(np.array([0.0]))  # 默认值
 
     # 处理成numpy数组
-    data["steps"] = np.array(steps)
-    data["losses"] = np.array(losses)
-    if grad_norms:
-        data["grad_norms"] = np.array(grad_norms)
-    if hessian_eigs:
-        data["hessian_eigs"] = np.array(hessian_eigs)
+    if losses:
+        data["steps"] = np.array(steps)
+        data["losses"] = np.array(losses)
+        if grad_norms:
+            data["grad_norms"] = np.array(grad_norms)
+        if hessian_eigs:
+            data["hessian_eigs"] = np.array(hessian_eigs)
 
-    return data
+    return data if "losses" in data and len(data["losses"]) > 0 else None
 
 
 def plot_training_curves(data, save_path=None, show_plot=True):

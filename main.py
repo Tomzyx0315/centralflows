@@ -1,5 +1,7 @@
 import json
 import os
+os.environ['HF_ENDPOINT'] = "https://hf-mirror.com"
+
 import shutil
 import sys
 import uuid
@@ -193,12 +195,12 @@ def main(
     print(f"Comparing full-batch vs mini-batch: {compare_full_vs_mini}")
     print(f"Hessian will be computed after each parameter update using full-batch data")
 
-    # Calculate total steps needed
+    # Calculate total steps needed: all processes save at batch frequency
     num_processes_saving = 0
     if compare_full_vs_mini and "discrete" in runs:
         num_processes_saving += 2  # discrete_full and discrete_mini
-    else:
-        num_processes_saving = len(active_runs)
+    if "central" in processes:  # central also saves at batch frequency for comparison
+        num_processes_saving += 1
     total_steps = epochs * len(dataset.trainset_batches) * num_processes_saving
 
     with DataSaver(
@@ -273,6 +275,31 @@ def main(
                         step_data["discrete_full"]["hessian_eigs"] = process.eff_eigs
 
                     # save full-batch step data
+                    data_saver.save(total_step_counter, step_data)
+                    total_step_counter += 1
+
+            # ================== central flow training ==================
+            if compare_full_vs_mini and "central" in processes:
+                process = processes["central"]
+
+                # central flow updates at the same batch frequency for fair comparison
+                for batch_idx, _ in enumerate(train_batches):
+                    step_data = defaultdict(lambda: {})
+
+                    # central flow uses full-batch data (as continuous flow)
+                    process.loss_fn = full_loss_fn
+                    process.prepare()  # compute at current location
+                    process.step()     # take central flow step
+
+                    # collect data for this step
+                    step_data["central"].update({
+                        "loss": process.loss,
+                        "grad_norm": process.gradient.norm().item() if process.gradient is not None else 0.0,
+                    })
+                    if process.eff_eigs is not None:
+                        step_data["central"]["hessian_eigs"] = process.eff_eigs
+
+                    # save central flow data
                     data_saver.save(total_step_counter, step_data)
                     total_step_counter += 1
 
