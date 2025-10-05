@@ -23,13 +23,16 @@ def load_experiment_data(experiment_path):
     data = {}
 
     with h5py.File(h5_file, "r", libver="latest", swmr=True) as f:
+        # 打印所有可用的key来调试
+        print(f"Found HDF5 keys: {list(f.keys())}")
+
         # 查找所有根级别的键
         for key in f.keys():
-            if key.startswith("discrete_full"):
+            if key.startswith("discrete_full") or key == "discrete_full":
                 data["full_batch"] = extract_process_data(f, key)
-            elif key.startswith("discrete_mini"):
+            elif key.startswith("discrete_mini") or key == "discrete_mini":
                 data["mini_batch"] = extract_process_data(f, key)
-            elif key.startswith("central"):
+            elif key.startswith("central") or key == "central":
                 data["central_flow"] = extract_process_data(f, key)
 
         # 如果没有找到带后缀的数据，尝试不带后缀的
@@ -174,18 +177,22 @@ def plot_training_curves(data, save_path=None, show_plot=True):
     ax_diff.text(0.1, 0.8, "Training Comparison:\n\n", fontsize=12, fontweight="bold")
 
     process_names = []
-    if "full_batch" in data:
-        final_loss = data["full_batch"]["losses"][-1] if len(data["full_batch"]["losses"]) > 0 else float('nan')
+    if "full_batch" in data and "losses" in data["full_batch"] and len(data["full_batch"]["losses"]) > 0:
+        final_loss = data["full_batch"]["losses"][-1]
         process_names.append(f"Full-batch: {final_loss:.4f}")
-    if "mini_batch" in data:
-        final_loss = data["mini_batch"]["losses"][-1] if len(data["mini_batch"]["losses"]) > 0 else float('nan')
+    if "mini_batch" in data and "losses" in data["mini_batch"] and len(data["mini_batch"]["losses"]) > 0:
+        final_loss = data["mini_batch"]["losses"][-1]
         process_names.append(f"Mini-batch: {final_loss:.4f}")
-    if "central_flow" in data:
-        final_loss = data["central_flow"]["losses"][-1] if len(data["central_flow"]["losses"]) > 0 else float('nan')
+    if "central_flow" in data and "losses" in data["central_flow"] and len(data["central_flow"]["losses"]) > 0:
+        final_loss = data["central_flow"]["losses"][-1]
         process_names.append(f"Central Flow: {final_loss:.4f}")
-    for name in process_names:
-        ax_diff.text(0.1, 0.8 - 0.15 * process_names.index(name),
-                    name, fontsize=10, transform=ax_diff.transAxes)
+
+    if not process_names:
+        ax_diff.text(0.1, 0.6, "No valid data found", fontsize=10, transform=ax_diff.transAxes)
+    else:
+        for name in process_names:
+            ax_diff.text(0.1, 0.8 - 0.15 * process_names.index(name),
+                        name, fontsize=10, transform=ax_diff.transAxes)
 
     ax_diff.set_xlim(0, 1)
     ax_diff.set_ylim(0, 1)
@@ -220,10 +227,12 @@ def main():
         # 检查加载了什么数据
         print("Loaded data for:")
         for key in data:
-            if "losses" in data[key]:
+            if "losses" in data[key] and len(data[key]["losses"]) > 0:
                 steps = len(data[key]["steps"])
                 final_loss = data[key]["losses"][-1]
                 print(f"  - {key}: {steps} steps, final loss: {final_loss:.6f}")
+            elif key in data:
+                print(f"  - {key}: No valid loss data found")
 
         # 绘图
         plot_training_curves(data, save_path=args.save_path, show_plot=not args.no_show)

@@ -193,8 +193,16 @@ def main(
     print(f"Comparing full-batch vs mini-batch: {compare_full_vs_mini}")
     print(f"Hessian will be computed after each parameter update using full-batch data")
 
+    # Calculate total steps needed
+    num_processes_saving = 0
+    if compare_full_vs_mini and "discrete" in runs:
+        num_processes_saving += 2  # discrete_full and discrete_mini
+    else:
+        num_processes_saving = len(active_runs)
+    total_steps = epochs * len(dataset.trainset_batches) * num_processes_saving
+
     with DataSaver(
-        folder / "data.hdf5", initial_step=0, total_steps=epochs * len(dataset.trainset_batches)
+        folder / "data.hdf5", initial_step=0, total_steps=total_steps
     ) as data_saver:
 
         total_step_counter = 0
