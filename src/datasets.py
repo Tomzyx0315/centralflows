@@ -28,10 +28,13 @@ class Examples(NamedTuple):
 
 class Dataset(NamedTuple):
     """A neural network training problem packaged together."""
-    
+
     trainset: Iterable[Examples]
-    """Training dataset, as an iterable of batches of the form (inputs, labels)"""
-    
+    """Training dataset as full-batch (single batch) for Hessian computation"""
+
+    trainset_batches: List[Examples]
+    """Training dataset divided into mini-batches for training"""
+
     testset: Iterable[Examples]
     """Testing dataset, as an iterable of batches of the form (inputs, labels)"""
 
@@ -43,7 +46,7 @@ class Dataset(NamedTuple):
 
     output_dim: int
     """Output dimension for the neural network."""
-    
+
     input_shape: Tuple[int, ...]
     """Shape of the input data."""
 
@@ -52,10 +55,10 @@ class Dataset(NamedTuple):
 @dataclass(kw_only=True)
 class DatasetBuilder:
     """Abstract parent class for datasets.
-    
+
     Example usage:
       dataset = CIFAR10(**kwargs).load(device=device)
-    
+
     Subclasses should override the following functions:
      - criterion_fn: compute loss criterion over a batch
      - accuracy_fn: compute accuracy over a batch
@@ -63,12 +66,15 @@ class DatasetBuilder:
          be cached on the system after the first time
      - make: make the dataset
     """
-    
+
     # even though training is full-batch, for memory
     # reasons we can use a smaller, 'ghost' batch size
     # when looping over the data (-1 = full-batch)
     ghost_batch_size: int = -1
-    
+
+    # training batch size for mini-batch training (-1 = full-batch)
+    train_batch_size: int = -1
+
     # the directory where raw data will be cached
     cache_dir: str = "data_cache"
     
@@ -107,29 +113,33 @@ class DatasetBuilder:
         """Load the dataset."""
         # download or uncache the raw data, if there is any
         raw_data = self._get_raw_data() # returns None if there is no raw data
-        
+
         # make the dataset, possibly using the downloaded/uncached raw data
         train, test = self.make(raw_data=raw_data)
-        
+
         # shuffle the data
         train, test = self._shuffle(train), self._shuffle(test)
-        
+
         # convert data from numpy to pytorch
         train, test = self._to_torch(train, device=device), self._to_torch(test, device=device)
-        
-        # divide data into (ghost) batches
-        trainset, testset = self._batch(train), self._batch(test)
-        
+
+        # divide data into (ghost) batches for memory management
+        ghost_trainset, testset = self._batch(train), self._batch(test)
+
+        # create mini-batch version of training set
+        trainset_batches = self._create_training_batches(ghost_trainset, device=device)
+
         # get loss criterion function and accuracy function
         criterion_fn, accuracy_fn = self.get_loss_and_acc()
-        
+
         return Dataset(
-            trainset=trainset,
+            trainset=ghost_trainset,  # full-batch for Hessian computation
+            trainset_batches=trainset_batches,  # mini-batches for training
             testset=testset,
             criterion_fn=criterion_fn,
             accuracy_fn=accuracy_fn,
             output_dim=self.get_output_dim(),
-            input_shape=trainset[0].inputs.shape[1:]
+            input_shape=ghost_trainset[0].inputs.shape[1:]
         )
 
     def _get_raw_data(self):
@@ -174,6 +184,30 @@ class DatasetBuilder:
             torch.from_numpy(examples.inputs).to(device),
             torch.from_numpy(examples.labels).to(device)
         )
+
+    def _create_training_batches(self, ghost_trainset: List[Examples], device=None) -> List[Examples]:
+        """Create training batches from ghost batches.
+
+        This method flattens all ghost batches and re-organizes them
+        into training mini-batches of size train_batch_size.
+        """
+        if self.train_batch_size <= 0:
+            # If train_batch_size is -1, return single full-batch
+            return ghost_trainset
+
+        # Flatten all ghost batches into single arrays
+        all_inputs = torch.cat([batch.inputs for batch in ghost_trainset])
+        all_labels = torch.cat([batch.labels for batch in ghost_trainset])
+
+        # Create new mini-batches
+        n_samples = len(all_inputs)
+        batch_sizes = _batch_sizes(n_samples, self.train_batch_size)
+
+        input_batches = torch.split(all_inputs, batch_sizes)
+        label_batches = torch.split(all_labels, batch_sizes)
+
+        return [Examples(inputs_batch, labels_batch) for
+                (inputs_batch, labels_batch) in zip(input_batches, label_batches)]
 
 
 def _batch_sizes(n: int, batch_size: int) -> List[int]:

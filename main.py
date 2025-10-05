@@ -61,7 +61,9 @@ def main(
     checkpointer: Annotated[Checkpointer, arg(name="checkpoint")],            # settings for saving checkpoints
     load: Annotated[LoadOptions, arg(name="load")],                           # optionally, settings for loading checkoints
     warm_start: int = -1,           # how many steps to warm-start for
-    steps: int = 50,                # how many steps to train for
+    epochs: int = 10,               # how many epochs to train for
+    batch_size: int = 128,          # mini-batch size for training
+    compare_full_vs_mini: bool = True,  # whether to compare full-batch and mini-batch
     device: str = "cuda",           # cuda or cpu
     seed: int = 0,                  # random seed
     expid: Optional[str] = None,    # optionally, an experiment id (defaults to a random UUID)
@@ -90,8 +92,9 @@ def main(
     # set random seed
     torch.manual_seed(seed)
     
-    # load the dataset
+    # load the dataset with batch_size
     print("Loading Data")
+    data.train_batch_size = batch_size  # set batch size for dataset
     dataset = data.load(device=device)
     
     # instantiate the model as a PyTorch module
@@ -103,10 +106,12 @@ def main(
     # initialize optimizer state
     state = opt.initialize_state(w) 
     
-    # put together loss function
-    loss_fn = SupervisedLossFunction(
+    # put together loss functions
+    full_loss_fn = SupervisedLossFunction(
         model_fn=model_fn, criterion=dataset.criterion_fn, batches=dataset.trainset
     )
+
+    print(f"Dataset contains {len(dataset.trainset)} full-batches and {len(dataset.trainset_batches)} mini-batches")
     
     # these are loggers that are called on each individual process 
     process_loggers = {
@@ -138,64 +143,140 @@ def main(
         else:
             print(f"Warm starting for {warm_start} steps")
             for _ in trange(warm_start):
-                w, state = opt.update(w, state, loss_fn.D(w))
+                w, state = opt.update(w, state, full_loss_fn.D(w))
             initial_step = warm_start
 
 
     # initialize processes
     processes = {}
-    kwargs = dict(loss_fn=loss_fn, w=w, state=state, opt=opt, eig_config=eig_config)
-    if "discrete" in runs:
-        processes["discrete"] = DiscreteProcess(**kwargs, config=discrete_config)
-    if "midpoint" in runs:
-        processes["midpoint"] = MidpointProcess(**kwargs, config=midpoint_config)
-    if "central" in runs:
-        processes["central"] = CentralFlow(**kwargs, config=central_config)
-    if "stable" in runs:
-        processes["stable"] = StableFlow(**kwargs, config=stable_config)
+
+    # 根据参数决定创建哪些进程
+    active_runs = set()
+    if compare_full_vs_mini:
+        # 同时运行full和mini版本
+        if "discrete" in runs:
+            active_runs.update(["discrete_full", "discrete_mini"])
+            # 创建两个版本独立的进程，都有自己的参数和状态副本
+            # 它们从同样的初始点开始，但会沿着不同的轨迹演化
+            kwargs_full = dict(loss_fn=full_loss_fn, w=w.clone(), state=state.clone(),
+                              opt=opt, eig_config=eig_config)
+            kwargs_mini = dict(loss_fn=full_loss_fn, w=w.clone(), state=state.clone(),
+                              opt=opt, eig_config=eig_config)
+            processes["discrete_full"] = DiscreteProcess(**kwargs_full, config=discrete_config)
+            processes["discrete_mini"] = DiscreteProcess(**kwargs_mini, config=discrete_config)
+        # 其他进程类型暂不支持full vs mini对比
+        if "central" in runs:
+            active_runs.add("central")
+            kwargs = dict(loss_fn=full_loss_fn, w=w.clone(), state=state.clone(),
+                         opt=opt, eig_config=eig_config)
+            processes["central"] = CentralFlow(**kwargs, config=central_config)
+    else:
+        # 维持原版运行方式
+        active_runs = runs
+        kwargs = dict(loss_fn=full_loss_fn, w=w, state=state, opt=opt, eig_config=eig_config)
+        if "discrete" in runs:
+            processes["discrete"] = DiscreteProcess(**kwargs, config=discrete_config)
+        if "midpoint" in runs:
+            processes["midpoint"] = MidpointProcess(**kwargs, config=midpoint_config)
+        if "central" in runs:
+            processes["central"] = CentralFlow(**kwargs, config=central_config)
+        if "stable" in runs:
+            processes["stable"] = StableFlow(**kwargs, config=stable_config)
 
     # load from checkpoint, if appropriate
     if load.path is not None:
         print(f"Loading Checkpoint from {load.path}")
         initial_step = checkpointer.load(load, processes)
 
-    # main training loop - run all processes in parallel
-    print(
-        f"Running concurrent processes from step {initial_step} to {initial_step + steps}"
-    )
+    # main training loop - compare full-batch and mini-batch
+    print(f"Running training for {epochs} epochs with batch_size={batch_size}")
+    print(f"Comparing full-batch vs mini-batch: {compare_full_vs_mini}")
+    print(f"Hessian will be computed after each parameter update using full-batch data")
+
     with DataSaver(
-        folder / "data.hdf5", initial_step=initial_step, total_steps=steps
+        folder / "data.hdf5", initial_step=0, total_steps=epochs * len(dataset.trainset_batches)
     ) as data_saver:
-        for i in trange(steps):
-            # TODO: this currently is not used anywhere
-            # step = initial_step + i
-                        
-            # save checkpoint if appropriate
-            checkpointer.maybe_checkpoint(i, processes)
-            
-            # collected data will go here
-            out = defaultdict(lambda: {})
-            
-            # for each process: prepare for the step
-            for name in processes:
-                process_log = processes[name].prepare()
-                out[name].update(process_log)
-            
-            # run group loggers
-            for logger in group_loggers:
-                out.update(logger.log(processes))
-                
-            # run individual loggers
-            for name in processes:
-                for logger in process_loggers[name]:
-                    out[name].update(logger.log(processes[name]))
-                                        
-            # for each process: take the step
-            for name in processes:
-                processes[name].step()
-                
-            # save data to disk
-            data_saver.save(i, out)
+
+        total_step_counter = 0
+
+        for epoch in trange(epochs):
+            train_batches = list(dataset.trainset_batches)
+
+            # shuffle mini-batches for each epoch
+            import random
+            random.shuffle(train_batches)
+
+            # ================== mini-batch training ==================
+            if compare_full_vs_mini and "discrete_mini" in processes:
+                process = processes["discrete_mini"]
+
+                # mini-batch iterations within this epoch
+                for batch_idx, batch in enumerate(train_batches):
+                    step_data = defaultdict(lambda: {})
+
+                    # create batch-specific loss function for gradient
+                    batch_loss_fn = SupervisedLossFunction(
+                        model_fn=model_fn,
+                        criterion=dataset.criterion_fn,
+                        batches=[batch]
+                    )
+
+                    # mini-batch update: compute gradient on current batch
+                    process.loss_fn = batch_loss_fn
+                    process.prepare()  # compute gradient on this batch, but NOT Hessian
+                    process.step()     # update parameters using batch gradient
+
+                    # immediately compute Hessian at new parameter location using full-batch
+                    process.loss_fn = full_loss_fn
+                    process.prepare()  # compute Hessian at current location
+
+                    # collect data for this step
+                    step_data["discrete_mini"].update({
+                        "loss": process.loss,
+                        "grad_norm": process.gradient.norm().item() if process.gradient is not None else 0.0,
+                    })
+                    if process.eff_eigs is not None:
+                        step_data["discrete_mini"]["hessian_eigs"] = process.eff_eigs
+
+                    # save step-level data
+                    data_saver.save(total_step_counter, step_data)
+                    total_step_counter += 1
+
+            # ================== full-batch training ==================
+            if compare_full_vs_mini and "discrete_full" in processes:
+                process = processes["discrete_full"]
+
+                # full-batch version also updates for every batch (matching frequency)
+                # but always uses the full dataset gradient
+                for batch_idx, _ in enumerate(train_batches):
+                    step_data = defaultdict(lambda: {})
+
+                    # always use full dataset for gradient calculation
+                    process.loss_fn = full_loss_fn
+                    process.prepare()  # compute full-batch gradient and Hessian
+                    process.step()     # update using full-batch gradient
+
+                    # collect data for this step
+                    step_data["discrete_full"].update({
+                        "loss": process.loss,
+                        "grad_norm": process.gradient.norm().item() if process.gradient is not None else 0.0,
+                    })
+                    if process.eff_eigs is not None:
+                        step_data["discrete_full"]["hessian_eigs"] = process.eff_eigs
+
+                    # save full-batch step data
+                    data_saver.save(total_step_counter, step_data)
+                    total_step_counter += 1
+
+            # 每个epoch仍然报告进度
+            if compare_full_vs_mini and epoch % 10 == 0:
+                if "discrete_full" in processes and "discrete_mini" in processes:
+                    w_full = processes["discrete_full"].w
+                    w_mini = processes["discrete_mini"].w
+                    loss_full = full_loss_fn(w_full)
+                    loss_mini = full_loss_fn(w_mini)
+                    param_diff = (w_full - w_mini).norm().item()
+                    print(f"Epoch {epoch}: diff={param_diff:.4f}, loss_full={loss_full:.4f}, loss_mini={loss_mini:.4f}")
 
 
 def _create_experiment_folder(expid: int) -> Path:
