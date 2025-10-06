@@ -117,9 +117,20 @@ That's all!  You now understand the basics.  Here are some finer points:
   <img src="figures/def-midpoint.png" alt="Second-order midpoint" width="300px" />
 </p>
 
- This 'averages out' most of the oscillations along the top Hessian eigenvectors.  To support this, we have implemented a `midpoint` process whose iterates are the midpoint iterates $\{w^*_t\}$ of the discrete process.   In other words, if you add `midpoint` to the list of runs, then the entry `datafile['midpoint']['train_loss'][:]` in the data file will contain the training loss, for example, measured at these midpoints.
-  
+This 'averages out' most of the oscillations along the top Hessian eigenvectors.  To support this, we have implemented a `midpoint` process whose iterates are the midpoint iterates $\{w^*_t\}$ of the discrete process.   In other words, if you add `midpoint` to the list of runs, then the entry `datafile['midpoint']['train_loss'][:]` in the data file will contain the training loss, for example, measured at these midpoints.
+
   Continually re-computing the Hessian eigenvalues at the actual discrete iterates can be much more computationally expensive than computing the Hessian eigenvalues at the midpoint iterates, since the oscillatory motion makes the warm-starts less effective, necessitating more solver iterations to reach a fixed tolerance.  If you're running both `discrete` and `midpoint` and would like to only compute the Hessian eigenvalues at the midpoints, you can pass `--eig.frequency 1 --discrete.eig.frequency -1`; this will set a global eig frequency of 1 but then override it for the discrete process.
  - **Checkpointing**: the code supports saving and loading from checkpoints.  The checkpoints will be saved in the "checkpoints" subdirectory of the experiment directory.  Each checkpoint contains the state for all processes. To save a checkpoint every $k$ iterations, pass `--checkpoint.frequency k`.   To save checkpoints at a fixed list of iterations, pass `--checkpoint.steps iteration1 iterations2 iteration3` etc.    To initialize from a checkpoint at location "path", pass `--checkpoint-file path`.
+ - **Batch Gradient Descent**: Added `discrete_batch` process that performs minibatch gradient descent. Each step samples a random batch for optimization, while still computing Hessian eigenvalues using the full dataset (maintaining accurate landscape information). Configure batch size with `--discrete_batch.batch_size=N`.
 
 Complete documentation for [main.py](main.py) can be found [here](docs/main.md).
+
+## Plotting Results
+
+Use the included plotting script to visualize experiment results:
+
+```bash
+python plot.py experiments/exp_id/data.hdf5 --processes discrete central discrete_batch
+```
+
+This generates plots showing loss curves, gradient norms, and Hessian eigenvalues for each process. Hessian eigenvalues are displayed in separate subplots per process for clarity.

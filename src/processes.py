@@ -126,6 +126,17 @@ class DiscreteProcessConfig:
 
 
 @dataclass
+class DiscreteBatchProcessConfig:
+    # Batch size for minibatch optimization.
+    # If None, uses the dataset's default batching.
+    batch_size: Optional[int] = None
+
+    # optional process-specific configs for eigenvalue computation.
+    # settings here will override those in the global eig config
+    eig: EigConfigOverride = field(default_factory=EigConfigOverride)
+
+
+@dataclass
 class DiscreteProcess(Process):
     """Run the discrete optimization algorithm."""
     
@@ -484,8 +495,61 @@ class CentralFlow(Process):
 
     def step(self):
         self.w, self.state = self.next
-        
-    
+
+
+@dataclass
+class DiscreteBatchProcess(Process):
+    """Run the discrete optimization algorithm using batch gradient descent."""
+
+    config: DiscreteBatchProcessConfig
+
+    def __post_init__(self, global_eig_config: EigConfig):
+        # override global eig config with non-None entries of the process-specific eig config
+        eig_config = apply_overrides(global_eig_config, self.config.eig)
+        super().__post_init__(eig_config)
+
+    def prepare(self):
+        timer = Timer()
+
+        # sample a random batch from the dataset
+        if self.config.batch_size is not None and hasattr(self.loss_fn, 'sample_minibatch'):
+            # Use process-specific batch size
+            random_batch = self.loss_fn.sample_minibatch(self.config.batch_size)
+        else:
+            # Fallback to original method (sample from pre-batched dataset)
+            random_batch = self._sample_random_batch()
+
+        # compute batch gradient and loss
+        with timer("batch_grad_and_value"):
+            # compute batch loss and gradient manually
+            output = self.loss_fn.model_fn.apply(self.w, random_batch.inputs)
+            batch_loss = self.loss_fn.criterion(output, random_batch.labels).mean()
+            self.loss = batch_loss.item()
+            self.gradient = torch.autograd.grad(batch_loss, self.w)[0]
+
+            # update optimizer state with batch gradient
+            self.state = self.opt.update_state(self.state, self.gradient)
+
+            P = self.opt.P(self.state)
+
+        # compute full Hessian eigenvalues (not batch Hessian)
+        with timer("eig"):
+            self.eff_eigs, _, eig_logs = self.eig_manager.get(self.w, P=P)
+
+        return dict(times=timer.times, eig_logs=eig_logs)
+
+    def step(self):
+        P = self.opt.P(self.state)
+        self.w -= P.pow(-1)(self.gradient)
+
+    def _sample_random_batch(self):
+        """Sample a random batch from the training dataset."""
+        import random
+        # assuming self.loss_fn.batches is an iterable of batches
+        batches_list = list(self.loss_fn.batches)
+        return random.choice(batches_list)
+
+
 class EigManager:
     """Manages eigenvalue computation for the processes.
     
@@ -543,4 +607,3 @@ class EigManager:
 
         self.counter += 1
         return eigs, U, log
-    

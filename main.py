@@ -9,6 +9,8 @@ from typing import Annotated, Literal, Optional, Set, Union
 
 import git
 import torch
+
+# Add plot.py import for visualization
 import tyro
 from tqdm import trange
 from tyro.conf import arg, subcommand
@@ -23,6 +25,8 @@ from src.processes import (
     CentralFlowConfig,
     DiscreteProcess,
     DiscreteProcessConfig,
+    DiscreteBatchProcess,
+    DiscreteBatchProcessConfig,
     MidpointProcess,
     MidpointProcessConfig,
     StableFlow,
@@ -46,7 +50,7 @@ ValidOpt = Union[
 ]
 ValidData = Union[CIFAR10, SST2, Sorting, Copying, Moons, Circles, Classification]#, FlattenedMNIST, SparseParity]
 ValidArch = Union[CNN, MLP, VIT, LSTM, Mamba, Transformer, Resnet]
-ValidRuns = Set[Literal["discrete", "midpoint", "central", "stable", "stationary"]]
+ValidRuns = Set[Literal["discrete", "midpoint", "central", "stable", "stationary", "discrete_batch"]]
 
 def main(
     opt: ValidOpt,    # which optimization algorithm to use
@@ -55,6 +59,7 @@ def main(
     runs: ValidRuns,  # which processes (e.g. discrete alg, central flow, stable flow) to run
     eig_config: Annotated[EigConfig, arg(name="eig")],                        # global config for eigenvalues
     discrete_config: Annotated[DiscreteProcessConfig, arg(name="discrete")],  # config for discrete process
+    discrete_batch_config: Annotated[DiscreteBatchProcessConfig, arg(name="discrete_batch")],  # config for discrete batch process
     midpoint_config: Annotated[MidpointProcessConfig, arg(name="midpoint")],  # config for midpoint process
     stable_config: Annotated[StableFlowConfig, arg(name="stable")],           # config for stable flow
     central_config: Annotated[CentralFlowConfig, arg(name="central")],        # config for central flow
@@ -153,6 +158,8 @@ def main(
         processes["central"] = CentralFlow(**kwargs, config=central_config)
     if "stable" in runs:
         processes["stable"] = StableFlow(**kwargs, config=stable_config)
+    if "discrete_batch" in runs:
+        processes["discrete_batch"] = DiscreteBatchProcess(**kwargs, config=discrete_batch_config)
 
     # load from checkpoint, if appropriate
     if load.path is not None:

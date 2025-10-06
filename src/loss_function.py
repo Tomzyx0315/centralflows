@@ -57,12 +57,12 @@ class SupervisedLossFunction(LossFunction):
     
     def __init__(self, model_fn: FunctionalModel, criterion: LossCriterion, batches: Iterable[Examples]):
         """Create the loss function.
-        
+
         Args:
           model_fn (FunctionalModel): the model function f
           criterion (LossCriterion): the loss criterion l
-          batches (Iterable[Examples]):  the training dataset, in batches
-          
+          batches (Iterable[Examples)):  the training dataset, in batches
+
         """
         def batch_loss(w, batch: Examples):
             output = model_fn.apply(w, batch.inputs)
@@ -71,6 +71,20 @@ class SupervisedLossFunction(LossFunction):
         self.batch_loss = batch_loss
         self.model_fn = model_fn
         self.batches = batches
+
+        # Store full training set for potential minibatch sampling
+        # Flatten all batches into single Examples object
+        all_inputs = []
+        all_labels = []
+        for batch in batches:
+            all_inputs.append(batch.inputs)
+            all_labels.append(batch.labels)
+        if all_inputs:
+            self.full_inputs = torch.cat(all_inputs, dim=0)
+            self.full_labels = torch.cat(all_labels, dim=0)
+            self.full_trainset = Examples(self.full_inputs, self.full_labels)
+        else:
+            self.full_trainset = None
 
     def __call__(self, w) -> float:
         """Evaluate the loss function at weights w."""
@@ -97,7 +111,18 @@ class SupervisedLossFunction(LossFunction):
         def over_batch(batch): # D over a batch
           return D(lambda w_: self.batch_loss(w_, batch), w, order, *vs)
         return dataloop(over_batch, self.batches)
-        
+
+    def sample_minibatch(self, batch_size: int) -> Examples:
+        """Sample a random minibatch of given size from full training set."""
+        if self.full_trainset is None or batch_size >= len(self.full_trainset):
+            # If no full set or batch_size too large, return the first batch
+            return next(iter(self.batches))
+        else:
+            indices = torch.randperm(len(self.full_trainset))[:batch_size]
+            inputs = self.full_inputs[indices]
+            labels = self.full_labels[indices]
+            return Examples(inputs, labels)
+
 
 def dataloop(avg_over_batch: Callable[[Examples], Any], batches: Iterable[Examples]):
     """Given averages over batches, compute average over dataset.
