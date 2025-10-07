@@ -1,5 +1,6 @@
 from typing import Any, Tuple, Iterable, Callable
 from functools import reduce
+import torch
 
 from torch.func import grad_and_value
 
@@ -69,6 +70,7 @@ class SupervisedLossFunction(LossFunction):
             return criterion(output, batch.labels)
 
         self.batch_loss = batch_loss
+        self.criterion = criterion  # Store the criterion for manual batch computations
         self.model_fn = model_fn
         self.batches = batches
 

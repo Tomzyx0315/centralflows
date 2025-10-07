@@ -40,7 +40,7 @@ def mse_categorical_loss(f: Array, y: Array, ignore_idx: int = -1) -> Array:
     f, y = _flatten(f, y, ignore_idx=ignore_idx)
 
     # convert labels to one-hot
-    one_hot_y = torch.nn.functional.one_hot(y).float()
+    one_hot_y = torch.nn.functional.one_hot(y, num_classes=f.shape[-1]).float()
     
     return mse_loss(f, one_hot_y)
 
@@ -150,4 +150,3 @@ def _flatten(f: Array, y: Array, ignore_idx=-1) -> Tuple[Array, Array]:
     f, y = f[keep], y[keep]
     
     return f,y
-    

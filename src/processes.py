@@ -521,11 +521,15 @@ class DiscreteBatchProcess(Process):
 
         # compute batch gradient and loss
         with timer("batch_grad_and_value"):
-            # compute batch loss and gradient manually
-            output = self.loss_fn.model_fn.apply(self.w, random_batch.inputs)
-            batch_loss = self.loss_fn.criterion(output, random_batch.labels).mean()
+            # Use functional approach to compute batch loss and gradient
+            # This is similar to self.loss_fn.grad_and_value but for a single batch
+            def single_batch_loss(w):
+                output = self.loss_fn.model_fn.apply(w, random_batch.inputs)
+                return self.loss_fn.criterion(output, random_batch.labels).mean()
+
+            batch_grad, batch_loss = torch.func.grad_and_value(single_batch_loss)(self.w)
+            self.gradient = batch_grad
             self.loss = batch_loss.item()
-            self.gradient = torch.autograd.grad(batch_loss, self.w)[0]
 
             # update optimizer state with batch gradient
             self.state = self.opt.update_state(self.state, self.gradient)

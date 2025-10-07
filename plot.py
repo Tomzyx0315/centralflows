@@ -25,7 +25,7 @@ def plot_results(hdf5_path: str, processes: list[str]):
     with h5py.File(hdf5_path, "r", libver="latest", swmr=True) as datafile:
         print(f"Plotting results from: {hdf5_path}")
         print(f"Available processes: {list(datafile.keys())}")
-
+        
         # Filter to only plot requested processes that exist
         available_processes = [p for p in processes if p in datafile]
         if not available_processes:
@@ -62,13 +62,38 @@ def plot_results(hdf5_path: str, processes: list[str]):
                 continue
 
             process_data = datafile[process_name]
-            print(f"Plotting process: {process_name} ({len(process_data)} steps)")
+            print(f"Plotting process: {process_name}")
 
-            # Get data arrays
-            steps = np.arange(len(process_data))
-            loss = process_data.get('train_loss', None)
-            grad_norm_sq = process_data.get('gradient_sq_norm', None)
+            # process_data is an HDF5 group, we need to access the datasets
+
+            # Get data arrays - process_data is HDF5 group, datasets are inside
+            if process_name == 'central':
+                loss = process_data.get('predicted_loss', None)
+                grad_norm_sq = process_data.get('predicted_grad_norm_sq', None)
+            else:
+                loss = process_data.get('train_loss', None)
+                grad_norm_sq = process_data.get('grad_norm_sq', None)
             hessian_eigs = process_data.get('hessian_eigs', None)
+
+            # Determine number of steps based on available data
+            step_counts = []
+            for data in [loss, grad_norm_sq, hessian_eigs]:
+                if data is not None:
+                    step_counts.append(len(data))
+            if step_counts:
+                n_steps = max(step_counts)  # Use the largest dataset size
+                print(f"  Found {n_steps} steps in data")
+            else:
+                print("  Warning: No data found for this process")
+                continue
+
+            steps = np.arange(n_steps)
+
+            PROC_COLORS = {
+                'discrete': 'tab:blue',
+                'discrete_batch': 'tab:orange',
+                'central': 'tab:green'
+            }
 
             # Plot 1: Training loss (shared across all processes)
             if n_processes <= 1:
@@ -78,9 +103,11 @@ def plot_results(hdf5_path: str, processes: list[str]):
 
             if loss is not None:
                 loss_vals = loss[:]
-                mask = ~np.isnan(loss_vals)  # Filter out nan values
+                mask = ~np.isnan(loss_vals)
+                # 取当前进程的固定颜色
+                c = PROC_COLORS.get(process_name, 'black')
                 target_loss_ax.plot(steps[mask], loss_vals[mask],
-                                   color=color, label=f'{process_name} (loss)', linewidth=2)
+                                    color=c, label=process_name, linewidth=2)
             else:
                 print(f"Warning: No train_loss data for {process_name}")
 
@@ -92,29 +119,36 @@ def plot_results(hdf5_path: str, processes: list[str]):
 
             if grad_norm_sq is not None:
                 grad_vals = grad_norm_sq[:]
-                mask = ~np.isnan(grad_vals)  # Filter out nan values
-                grad_norm = np.sqrt(grad_vals)  # Convert squared norm to norm
-                target_grad_ax.plot(steps[mask], grad_norm[mask],
-                                   color=color, label=f'{process_name} (grad norm)', linewidth=2)
+                mask = ~np.isnan(grad_vals)
+                c = PROC_COLORS.get(process_name, 'black')
+                target_grad_ax.plot(steps[mask], np.sqrt(grad_vals[mask]),
+                                    color=c, label=process_name, linewidth=2)
             else:
                 print(f"Warning: No gradient_sq_norm data for {process_name}")
 
             # Plot 3: Hessian eigenvalues (separate subplot per process)
+            # 预先准备一套颜色，前 3 个按需要指定，后面的用默认颜色循环
+            EIG_COLORS = ['blue', 'red', 'green']   # 0 号蓝，1 号红，2 号绿
+            EIG_COLORS += plt.rcParams['axes.prop_cycle'].by_key()['color']  # 其余用默认色
+
             if n_processes <= 1:
                 target_hess_ax = hessian_axes[0]
             else:
                 target_hess_ax = hessian_axes[i]
 
-            if hessian_eigs is not None and len(hessian_eigs.shape) >= 2 and hessian_eigs.shape[1] > 0:
+            if (hessian_eigs is not None
+                    and len(hessian_eigs.shape) >= 2
+                    and hessian_eigs.shape[1] > 0):
                 num_eigs = hessian_eigs.shape[1]
                 for eig_idx in range(num_eigs):
                     eig_vals = hessian_eigs[:, eig_idx]
-                    mask = ~np.isnan(eig_vals)  # Filter out nan values
-                    if np.sum(mask) > 0:  # Only plot if we have valid data
+                    mask = ~np.isnan(eig_vals)
+                    if np.sum(mask) > 0:
                         label = f'H e{eig_idx+1}'
-                        linestyle = '-' if eig_idx == 0 else '--' if eig_idx == 1 else '-.'
+                        # 关键：用颜色区分，不再用 linestyle 区分
+                        color = EIG_COLORS[eig_idx % len(EIG_COLORS)]
                         target_hess_ax.plot(steps[mask], eig_vals[mask],
-                                           color='blue', linestyle=linestyle, label=label, linewidth=2)
+                                        color=color, label=label, linewidth=2)
                         print(f"  Plotted {np.sum(mask)} points for {process_name} eigenvalue {eig_idx+1}")
             else:
                 print(f"Warning: No hessian_eigs data for {process_name}")
